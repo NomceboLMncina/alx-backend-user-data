@@ -1,86 +1,99 @@
 #!/usr/bin/env python3
 """
-User view module
+Main Flask application
 """
-from flask import abort, jsonify, request
+from flask import Flask, jsonify, abort, request
 from api.v1.views import app_views
-from models.user import User
+import os
+
+app = Flask(__name__)
+app.register_blueprint(app_views)
+
+# --- CORS configuration (optional, remove if not strictly needed) ---
+# from flask_cors import CORS
+# CORS(app, resources={r"/api/v1/*": {"origins": "*"}})
 
 
-@app_views.route('/users', methods=['GET'], strict_slashes=False)
-def get_users():
-    """Retrieves the list of all User objects"""
-    users = User.all()
-    return jsonify([user.to_json() for user in users])
+# --- Authentication instance initialization ---
+auth = None
+AUTH_TYPE = os.getenv('AUTH_TYPE')
+
+if AUTH_TYPE == 'basic_auth':  # Check for basic_auth first
+    from api.v1.auth.basic_auth import BasicAuth
+    auth = BasicAuth()
+elif AUTH_TYPE == 'auth':  # Fallback to general Auth if not basic_auth
+    from api.v1.auth.auth import Auth
+    auth = Auth()
+elif AUTH_TYPE == 'session_auth':  # Add support for session auth
+    from api.v1.auth.session_auth import SessionAuth
+    auth = SessionAuth()
 
 
-@app_views.route('/users/<user_id>', methods=['GET'], strict_slashes=False)
-def get_user(user_id):
-    """Retrieves a specific User object"""
-    if user_id == 'me':
+# --- Error handlers ---
+
+@app.errorhandler(401)
+def unauthorized(error):
+    """
+    Handler for 401 Unauthorized errors.
+    Returns a JSON response with status code 401.
+    """
+    return jsonify({"error": "Unauthorized"}), 401
+
+
+@app.errorhandler(403)
+def forbidden(error):
+    """
+    Handler for 403 Forbidden errors.
+    Returns a JSON response with status code 403.
+    """
+    return jsonify({"error": "Forbidden"}), 403
+
+
+@app.errorhandler(404)
+def not_found(error):
+    """
+    Handler for 404 Not Found errors.
+    Returns a JSON response with status code 404.
+    """
+    return jsonify({"error": "Not found"}), 404
+
+
+# --- before_request handler for authentication/authorization ---
+
+@app.before_request
+def handle_before_request():
+    """
+    Handles operations before each request is processed,
+    for authentication and authorization checks.
+    """
+    if auth is None:
+        return
+
+    excluded_paths = [
+        '/api/v1/status/',
+        '/api/v1/unauthorized/',
+        '/api/v1/forbidden/',
+        '/api/v1/auth_session/login/'  # Add login path to excluded paths
+    ]
+
+    if auth.require_auth(request.path, excluded_paths):
+        # Check for authorization header or session cookie
+        auth_header = auth.authorization_header(request)
+        session_cookie = auth.session_cookie(request)
+        
+        if auth_header is None and session_cookie is None:
+            abort(401)
+        
+        # Set current user on the request object
+        request.current_user = auth.current_user(request)
         if request.current_user is None:
-            abort(404)
-        return jsonify(request.current_user.to_json())
-    
-    user = User.get(user_id)
-    if user is None:
-        abort(404)
-    return jsonify(user.to_json())
+            abort(403)
 
 
-@app_views.route('/users', methods=['POST'], strict_slashes=False)
-def create_user():
-    """Creates a new User"""
-    data = request.get_json()
-    if not data:
-        abort(400, description="Not a JSON")
-    if 'email' not in data:
-        abort(400, description="Missing email")
-    if 'password' not in data:
-        abort(400, description="Missing password")
-    
-    user = User()
-    user.email = data['email']
-    user.password = data['password']
-    user.save()
-    return jsonify(user.to_json()), 201
+# --- Main execution block for running the Flask development server ---
 
+if __name__ == "__main__":
+    API_HOST = os.getenv('API_HOST', '0.0.0.0')
+    API_PORT = int(os.getenv('API_PORT', 5000))
 
-@app_views.route('/users/<user_id>', methods=['PUT'], strict_slashes=False)
-def update_user(user_id):
-    """Updates a User object"""
-    if user_id == 'me':
-        if request.current_user is None:
-            abort(404)
-        user = request.current_user
-    else:
-        user = User.get(user_id)
-        if user is None:
-            abort(404)
-    
-    data = request.get_json()
-    if not data:
-        abort(400, description="Not a JSON")
-    
-    ignore_keys = ['id', 'email', 'created_at', 'updated_at']
-    for key, value in data.items():
-        if key not in ignore_keys:
-            setattr(user, key, value)
-    user.save()
-    return jsonify(user.to_json())
-
-
-@app_views.route('/users/<user_id>', methods=['DELETE'], strict_slashes=False)
-def delete_user(user_id):
-    """Deletes a User object"""
-    if user_id == 'me':
-        if request.current_user is None:
-            abort(404)
-        user = request.current_user
-    else:
-        user = User.get(user_id)
-        if user is None:
-            abort(404)
-    
-    user.remove()
-    return jsonify({}), 200
+    app.run(host=API_HOST, port=API_PORT, debug=True)
